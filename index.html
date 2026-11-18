@@ -405,11 +405,11 @@
     // =========================================================================
     // 1. SAKLAR DEPLOYMENT & KONFIGURASI FIREBASE (WAJIB DI ATAS)
     // =========================================================================
-    const IS_PREVIEW = false; // Ubah menjadi false SAAT DEPLOY / PUBLISH agar terhubung murni ke Firebase tanpa data dummy
+    const IS_PREVIEW = true; // Ubah menjadi false SAAT DEPLOY / PUBLISH agar terhubung murni ke Firebase tanpa data dummy
 
-    // Aset Gambar Utama Halaman Login (Auto-Cache Permanen + Vektor Offline Fallback)
-    const LOGIN_HERO_IMAGE_URL = "https://i.ibb.co.com/VWYz6fBV/Sekolah-Modern-Kutai-Timur.png";
-    const LOGIN_HERO_CACHE_KEY = "sim_sarpras_login_hero_cache_v1";
+    // Aset Gambar Utama Halaman Login (Terpasang Permanen + Auto-Cache)
+    const LOGIN_HERO_IMAGE_URL = "https://i.ibb.co.com/4g1DL8Dq/c32ff3b3-ab68-4bcd-91dc-7ffef35afa1b.png";
+    const LOGIN_HERO_CACHE_KEY = "sim_sarpras_login_hero_cache_v2";
     const LOGIN_HERO_SVG_FALLBACK = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(`
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450">
         <defs>
@@ -438,6 +438,9 @@
       </svg>
     `);
 
+    // Bersihkan cache gambar lama agar langsung memakai gambar baru
+    try { localStorage.removeItem("sim_sarpras_login_hero_cache_v1"); } catch (e) {}
+
     function getEmbeddedLoginHeroSrc() {
       try {
         const cached = localStorage.getItem(LOGIN_HERO_CACHE_KEY);
@@ -458,12 +461,12 @@
         canvas.height = h;
         const ctx = canvas.getContext("2d");
         ctx.drawImage(imgEl, 0, 0, w, h);
-        const dataUri = canvas.toDataURL("image/jpeg", 0.85);
+        const dataUri = canvas.toDataURL("image/png");
         if (dataUri && dataUri.length > 200) {
           localStorage.setItem(LOGIN_HERO_CACHE_KEY, dataUri);
         }
       } catch (e) {
-        // Lewati jika browser membatasi canvas cross-origin; gambar tetap tampil normal
+        // Lewati jika browser membatasi canvas cross-origin; gambar URL utama tetap tampil normal
       }
     }
 
@@ -473,6 +476,12 @@
 
     window.handleLoginHeroError = function(imgEl) {
       if (!imgEl) return;
+      // Jika gagal dengan crossorigin, coba ulangi tanpa atribut crossorigin terlebih dahulu
+      if (imgEl.hasAttribute("crossorigin")) {
+        imgEl.removeAttribute("crossorigin");
+        imgEl.src = LOGIN_HERO_IMAGE_URL;
+        return;
+      }
       try {
         const cached = localStorage.getItem(LOGIN_HERO_CACHE_KEY);
         if (cached && cached.startsWith("data:image/") && imgEl.src !== cached) {
@@ -487,12 +496,12 @@
 
     // PASTE FIREBASE CONFIG ANDA DI SINI
     const firebaseConfig = {
-      apiKey: "AIzaSyCg-3XLJwM4EKuLfy_vNa6ZptfPuCG6ups",
-  authDomain: "siprasdikdas.firebaseapp.com",
-  projectId: "siprasdikdas",
-  storageBucket: "siprasdikdas.firebasestorage.app",
-  messagingSenderId: "979337104225",
-  appId: "1:979337104225:web:e4169f7b5539756ac19320"
+      apiKey: "ISI_DENGAN_API_KEY_FIREBASE_ANDA",
+      authDomain: "ISI_DENGAN_PROJECT_ID.firebaseapp.com",
+      projectId: "ISI_DENGAN_PROJECT_ID",
+      storageBucket: "ISI_DENGAN_PROJECT_ID.appspot.com",
+      messagingSenderId: "ISI_DENGAN_SENDER_ID",
+      appId: "ISI_DENGAN_APP_ID"
     };
 
     // Daftar Baku 18 Kecamatan di Kabupaten Kutai Timur
@@ -806,6 +815,7 @@
         usulanStatus: 'ALL'
       }
     };
+    window.state = state;
 
     // =========================================================================
     // 1B. EKSPOR EXCEL (.XLSX) MULTI-SHEET RAPI & SISTEM CETAK LAPORAN FORMAL
@@ -1458,6 +1468,12 @@
       renderApp();
     };
 
+    window.filterSaranaByPrasarana = function(prasaranaId) {
+      state.filters.saranaPrasarana = prasaranaId;
+      state.activeTab = 'sarana';
+      renderApp();
+    };
+
     window.setAppTheme = function(themeKey) {
       state.theme = applyAppTheme(themeKey, true);
       const themeObj = APP_THEMES[state.theme];
@@ -2103,7 +2119,6 @@
           <!-- Full-Page Transparent Background Image -->
           <img
             src="${heroImageSrc}"
-            crossorigin="anonymous"
             alt="Sekolah Modern Kutai Timur"
             onload="handleLoginHeroLoad(this)"
             onerror="handleLoginHeroError(this)"
@@ -2136,7 +2151,7 @@
                 ${IS_PREVIEW ? `
                   <div class="px-2.5 py-1 rounded-full bg-[#0B0E0D]/85 border border-[#A3E635]/40 flex items-center gap-1.5 text-[11px] text-[#A3E635] shrink-0">
                     <span class="w-2 h-2 rounded-full bg-[#A3E635] animate-pulse"></span>
-                    <span class="font-semibold"></span>
+                    <span class="font-semibold">Mode Pratinjau</span>
                   </div>
                 ` : ''}
               </div>
@@ -2151,7 +2166,7 @@
                   Sistem Informasi Manajemen <span class="text-transparent bg-clip-text bg-gradient-to-r from-[#A3E635] to-emerald-400">Sarana &amp; Prasarana</span> Sekolah Dasar
                 </h1>
                 <p class="animate-subtext-zoom-in text-xs sm:text-[12.5px] text-gray-300 leading-snug max-w-2xl">
-                  Platform pemetaan kondisi sarana dan prasarana secara terintegrasi, serta pengelolaan usulan rehabilitasi dan pengadaan jenjang Sekolah Dasar se-Kabupaten Kutai Timur.
+                  Platform pemetaan kondisi sarana dan prasarana jenjang Sekolah Dasar se-Kabupaten Kutai Timur.
                 </p>
               </div>
 
@@ -2159,7 +2174,6 @@
               <div class="relative z-10 flex-1 min-h-[175px] sm:min-h-[210px] lg:min-h-0 rounded-xl sm:rounded-2xl overflow-hidden border border-[#232926] bg-[#0B0E0D] shadow-xl w-full flex items-center justify-center group">
                 <img
                   src="${heroImageSrc}"
-                  crossorigin="anonymous"
                   alt="Sekolah Modern Kutai Timur"
                   onload="handleLoginHeroLoad(this)"
                   onerror="handleLoginHeroError(this)"
@@ -2221,7 +2235,7 @@
                     <label class="block text-xs font-semibold text-gray-300 mb-1">NPSN Sekolah Dasar</label>
                     <div class="relative">
                       <i data-lucide="hash" class="w-4 h-4 text-gray-500 absolute left-3.5 top-1/2 -translate-y-1/2"></i>
-                      <input type="text" name="npsn" required placeholder="Masukkan 8 digit NPSN SD"
+                      <input type="text" name="npsn" required value="${IS_PREVIEW ? '30400811' : ''}" placeholder="Masukkan 8 digit NPSN SD"
                         class="w-full pl-10 pr-4 py-2.5 rounded-xl bg-[#0B0E0D] border border-[#232926] text-white text-sm placeholder-gray-600 focus:border-[#A3E635] focus:outline-none transition-colors" />
                     </div>
                   </div>
@@ -2229,7 +2243,7 @@
                     <label class="block text-xs font-semibold text-gray-300 mb-1">Kata Sandi Sekolah</label>
                     <div class="relative">
                       <i data-lucide="lock" class="w-4 h-4 text-gray-500 absolute left-3.5 top-1/2 -translate-y-1/2"></i>
-                      <input type="password" name="password" required placeholder="••••••••"
+                      <input type="password" name="password" required value="${IS_PREVIEW ? '123' : ''}" placeholder="••••••••"
                         class="w-full pl-10 pr-4 py-2.5 rounded-xl bg-[#0B0E0D] border border-[#232926] text-white text-sm placeholder-gray-600 focus:border-[#A3E635] focus:outline-none transition-colors" />
                     </div>
                   </div>
@@ -2238,7 +2252,7 @@
                     <label class="block text-xs font-semibold text-gray-300 mb-1">Email Admin Bidang SD</label>
                     <div class="relative">
                       <i data-lucide="mail" class="w-4 h-4 text-gray-500 absolute left-3.5 top-1/2 -translate-y-1/2"></i>
-                      <input type="email" name="email" required placeholder="admin@dinas.go.id"
+                      <input type="email" name="email" required value="${IS_PREVIEW ? 'admin@dinas.go.id' : ''}" placeholder="admin@dinas.go.id"
                         class="w-full pl-10 pr-4 py-2.5 rounded-xl bg-[#0B0E0D] border border-[#232926] text-white text-sm placeholder-gray-600 focus:border-[#A3E635] focus:outline-none transition-colors" />
                     </div>
                   </div>
@@ -2246,7 +2260,7 @@
                     <label class="block text-xs font-semibold text-gray-300 mb-1">Kata Sandi Admin</label>
                     <div class="relative">
                       <i data-lucide="key-round" class="w-4 h-4 text-gray-500 absolute left-3.5 top-1/2 -translate-y-1/2"></i>
-                      <input type="password" name="password" required placeholder="••••••••"
+                      <input type="password" name="password" required value="${IS_PREVIEW ? 'admin123' : ''}" placeholder="••••••••"
                         class="w-full pl-10 pr-4 py-2.5 rounded-xl bg-[#0B0E0D] border border-[#232926] text-white text-sm placeholder-gray-600 focus:border-[#A3E635] focus:outline-none transition-colors" />
                     </div>
                   </div>
@@ -3122,16 +3136,16 @@
           </div>
 
           <div>
-            <label class="block text-xs text-gray-400 mb-1.5">Unggah Dokumen Gambar / Foto Kondisi (JPG, JPEG, PNG)</label>
+            <label class="block text-xs text-gray-400 mb-1.5">Unggah Dokumen Gambar / Foto Kondisi (Semua Format Gambar)</label>
             <input type="hidden" id="usulan-foto-data" name="foto_dokumen" value="" />
             <input type="hidden" id="usulan-foto-name" name="foto_nama" value="" />
-            <input type="file" id="usulan-foto-input" accept=".jpg,.jpeg,.png,image/jpeg,image/png" onchange="handleUsulanImageUpload(event)" class="hidden" />
+            <input type="file" id="usulan-foto-input" accept="image/*" onchange="handleUsulanImageUpload(event)" class="hidden" />
 
             <div class="flex flex-wrap items-center gap-3">
               <label for="usulan-foto-input"
                 class="cursor-pointer px-4 py-2.5 rounded-xl bg-[#0B0E0D] border border-dashed border-[#A3E635]/60 hover:border-[#A3E635] hover:bg-[#1A201D] text-xs font-semibold text-white inline-flex items-center gap-2 transition-colors">
                 <i data-lucide="image-plus" class="w-4 h-4 text-[#A3E635]"></i>
-                <span>Pilih & Unggah Gambar (JPG, JPEG, PNG)</span>
+                <span>Pilih & Unggah Gambar (Semua Format)</span>
               </label>
               <span id="usulan-foto-status" class="text-[11px] text-gray-400">Belum ada gambar dipilih</span>
             </div>
@@ -3161,10 +3175,10 @@
       const file = e.target?.files?.[0];
       if (!file) return;
 
-      const validTypes = ['image/jpeg', 'image/jpg', 'image/png'];
-      const extValid = /\.(jpe?g|png)$/i.test(file.name);
-      if (!validTypes.includes(file.type) && !extValid) {
-        showToast('Format file tidak didukung. Gunakan gambar berformat JPG, JPEG, atau PNG.', 'error');
+      const isImageMime = file.type && file.type.startsWith('image/');
+      const isImageExt = /\.(jpe?g|png|webp|gif|bmp|svg|ico|tiff?|avif|heic|heif|jfif)$/i.test(file.name);
+      if (!isImageMime && !isImageExt) {
+        showToast('File yang dipilih bukan gambar. Silakan pilih file gambar.', 'error');
         e.target.value = '';
         return;
       }
@@ -3172,51 +3186,75 @@
       const statusEl = document.getElementById('usulan-foto-status');
       if (statusEl) statusEl.textContent = 'Memproses gambar...';
 
+      const applyProcessedImage = function(dataUrl) {
+        const hiddenData = document.getElementById('usulan-foto-data');
+        const hiddenName = document.getElementById('usulan-foto-name');
+        const previewBox = document.getElementById('usulan-foto-preview-box');
+        const previewImg = document.getElementById('usulan-foto-preview-img');
+        const filenameEl = document.getElementById('usulan-foto-filename');
+
+        if (hiddenData) hiddenData.value = dataUrl;
+        if (hiddenName) hiddenName.value = file.name;
+        if (previewImg) previewImg.src = dataUrl;
+        if (filenameEl) filenameEl.textContent = file.name;
+        if (previewBox) previewBox.classList.remove('hidden');
+        if (statusEl) statusEl.textContent = 'Gambar siap dikirim ke Admin';
+        showToast('Dokumen gambar berhasil dimuat dan siap dikirim.', 'success');
+      };
+
       const reader = new FileReader();
       reader.onload = function(ev) {
+        const rawDataUrl = ev.target.result;
+
+        // Untuk SVG atau GIF animasi, simpan langsung agar vektor/animasi tetap utuh
+        if (file.type === 'image/svg+xml' || file.type === 'image/gif' || /\.(svg|gif)$/i.test(file.name)) {
+          if (rawDataUrl.length > 900000) {
+            showToast('Ukuran file GIF/SVG terlalu besar (maksimal ~650 KB).', 'error');
+            if (statusEl) statusEl.textContent = 'Ukuran gambar terlalu besar';
+            return;
+          }
+          applyProcessedImage(rawDataUrl);
+          return;
+        }
+
         const img = new Image();
         img.onload = function() {
-          const maxDim = 960;
-          let width = img.width;
-          let height = img.height;
-          if (width > maxDim || height > maxDim) {
-            if (width > height) {
-              height = Math.round((height * maxDim) / width);
-              width = maxDim;
-            } else {
-              width = Math.round((width * maxDim) / height);
-              height = maxDim;
+          try {
+            const maxDim = 960;
+            let width = img.width || 960;
+            let height = img.height || 720;
+            if (width > maxDim || height > maxDim) {
+              if (width > height) {
+                height = Math.round((height * maxDim) / width);
+                width = maxDim;
+              } else {
+                width = Math.round((width * maxDim) / height);
+                height = maxDim;
+              }
             }
+
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, width, height);
+
+            const outputMime = (file.type === 'image/png' || file.type === 'image/webp') ? file.type : 'image/jpeg';
+            const compressedDataUrl = canvas.toDataURL(outputMime, 0.8);
+            applyProcessedImage(compressedDataUrl);
+          } catch (canvasErr) {
+            applyProcessedImage(rawDataUrl);
           }
-
-          const canvas = document.createElement('canvas');
-          canvas.width = width;
-          canvas.height = height;
-          const ctx = canvas.getContext('2d');
-          ctx.drawImage(img, 0, 0, width, height);
-
-          const outputMime = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
-          const compressedDataUrl = canvas.toDataURL(outputMime, 0.78);
-
-          const hiddenData = document.getElementById('usulan-foto-data');
-          const hiddenName = document.getElementById('usulan-foto-name');
-          const previewBox = document.getElementById('usulan-foto-preview-box');
-          const previewImg = document.getElementById('usulan-foto-preview-img');
-          const filenameEl = document.getElementById('usulan-foto-filename');
-
-          if (hiddenData) hiddenData.value = compressedDataUrl;
-          if (hiddenName) hiddenName.value = file.name;
-          if (previewImg) previewImg.src = compressedDataUrl;
-          if (filenameEl) filenameEl.textContent = file.name;
-          if (previewBox) previewBox.classList.remove('hidden');
-          if (statusEl) statusEl.textContent = 'Gambar siap dikirim ke Admin';
-          showToast('Dokumen gambar berhasil dimuat dan siap dikirim.', 'success');
         };
         img.onerror = function() {
-          showToast('Gagal membaca file gambar. Coba pilih gambar lain.', 'error');
-          if (statusEl) statusEl.textContent = 'Gagal memuat gambar';
+          if (rawDataUrl.length <= 950000) {
+            applyProcessedImage(rawDataUrl);
+          } else {
+            showToast('Format gambar tidak dapat dikompresi otomatis dan ukurannya terlalu besar (>700 KB).', 'error');
+            if (statusEl) statusEl.textContent = 'Gagal memuat gambar';
+          }
         };
-        img.src = ev.target.result;
+        img.src = rawDataUrl;
       };
       reader.readAsDataURL(file);
     };
@@ -4452,7 +4490,7 @@
                 <i data-lucide="printer" class="w-4 h-4 text-[#A3E635]"></i>
                 <span>Cetak Laporan</span>
               </button>
-              <button onclick="openSaranaFormModal(null, state.filters.saranaPrasarana)" class="px-4 py-2.5 rounded-xl bg-[#A3E635] text-black text-xs sm:text-sm font-bold hover:bg-lime-300 flex items-center gap-2 lime-glow">
+              <button onclick="openSaranaFormModal(null, window.state.filters.saranaPrasarana)" class="px-4 py-2.5 rounded-xl bg-[#A3E635] text-black text-xs sm:text-sm font-bold hover:bg-lime-300 flex items-center gap-2 lime-glow">
                 <i data-lucide="plus" class="w-4 h-4"></i>
                 <span>Tambah Sarana</span>
               </button>
@@ -4659,7 +4697,7 @@
                   <div class="flex items-center justify-between pt-3 border-t border-[#232926] text-xs text-gray-400 gap-2">
                     <span>Luas: <strong class="text-white">${formatNumber(item.luas_m2)} m²</strong></span>
                     <div class="flex items-center gap-1.5">
-                      <button onclick="state.filters.saranaPrasarana = decodeURIComponent('${safeArg(item.id)}'); setActiveTab('sarana');"
+                      <button onclick="filterSaranaByPrasarana(decodeURIComponent('${safeArg(item.id)}'))"
                         class="px-2.5 py-1.5 rounded-lg bg-[#0B0E0D] hover:bg-[#1A201D] border border-[#232926] text-[#A3E635] font-semibold" title="Lihat Sarana di Ruang Ini">
                         Sarana (${linkedSarana.length})
                       </button>
