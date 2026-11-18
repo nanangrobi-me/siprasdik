@@ -406,6 +406,7 @@
     // 1. SAKLAR DEPLOYMENT & KONFIGURASI FIREBASE (WAJIB DI ATAS)
     // =========================================================================
     const IS_PREVIEW = false; // Ubah menjadi false SAAT DEPLOY / PUBLISH agar terhubung murni ke Firebase tanpa data dummy
+    const SCHOOL_AUTH_DOMAIN = "sekolah.kutim.local"; // Domain internal otomatis untuk Firebase Auth Operator SD
 
     // Aset Gambar Utama Halaman Login (Terpasang Permanen + Auto-Cache)
     const LOGIN_HERO_IMAGE_URL = "https://i.ibb.co.com/4g1DL8Dq/c32ff3b3-ab68-4bcd-91dc-7ffef35afa1b.png";
@@ -438,7 +439,6 @@
       </svg>
     `);
 
-    // Bersihkan cache gambar lama agar langsung memakai gambar baru
     try { localStorage.removeItem("sim_sarpras_login_hero_cache_v1"); } catch (e) {}
 
     function getEmbeddedLoginHeroSrc() {
@@ -465,9 +465,7 @@
         if (dataUri && dataUri.length > 200) {
           localStorage.setItem(LOGIN_HERO_CACHE_KEY, dataUri);
         }
-      } catch (e) {
-        // Lewati jika browser membatasi canvas cross-origin; gambar URL utama tetap tampil normal
-      }
+      } catch (e) {}
     }
 
     window.handleLoginHeroLoad = function(imgEl) {
@@ -476,7 +474,6 @@
 
     window.handleLoginHeroError = function(imgEl) {
       if (!imgEl) return;
-      // Jika gagal dengan crossorigin, coba ulangi tanpa atribut crossorigin terlebih dahulu
       if (imgEl.hasAttribute("crossorigin")) {
         imgEl.removeAttribute("crossorigin");
         imgEl.src = LOGIN_HERO_IMAGE_URL;
@@ -527,7 +524,7 @@
     ];
 
     // =========================================================================
-    // 1A. FUNGSI HELPER FORMAT, ESCAPE, GPS & STATE UTAMA APLIKASI
+    // 1A. FUNGSI HELPER FORMAT, ESCAPE, SANITASI GAMBAR, GPS & STATE UTAMA
     // =========================================================================
     function escapeHTML(str) {
       if (str === null || str === undefined) return '';
@@ -537,6 +534,25 @@
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+    }
+
+    function sanitizeImageDataUrl(uri) {
+      if (!uri || typeof uri !== 'string') return '';
+      const trimmed = uri.trim();
+      if (trimmed.startsWith('data:image/')) return trimmed;
+      return '';
+    }
+
+    // Batas aman maksimal panjang string Base64 gambar untuk Firestore (1 field max 1.048.487 bytes)
+    const MAX_FIRESTORE_IMAGE_CHARS = 750000;
+
+    function getByteLengthUtf8(str) {
+      if (!str) return 0;
+      try {
+        return new TextEncoder().encode(str).length;
+      } catch (e) {
+        return str.length;
+      }
     }
 
     function safeArg(str) {
@@ -653,6 +669,7 @@
         id: '30400811',
         npsn: '30400811',
         password: '123',
+        auth_email: `30400811@${SCHOOL_AUTH_DOMAIN}`,
         nama_sekolah: 'SD Negeri 011 Sangatta Selatan',
         jenjang: 'SD',
         status_sekolah: 'Negeri',
@@ -670,6 +687,7 @@
         id: '30400801',
         npsn: '30400801',
         password: '123',
+        auth_email: `30400801@${SCHOOL_AUTH_DOMAIN}`,
         nama_sekolah: 'SD Negeri 001 Sangatta Utara',
         jenjang: 'SD',
         status_sekolah: 'Negeri',
@@ -1081,11 +1099,23 @@
     })();
 
     // =========================================================================
-    // 3. FIREBASE SDK DYNAMIC IMPORT (HANYA AKTIF JIKA IS_PREVIEW === false)
+    // 3. FIREBASE SDK DYNAMIC IMPORT + SECONDARY AUTH APP (UNTUK PROVISIONING AKUN)
     // =========================================================================
+    let fbApp = null;
     let fbAuth = null;
+    let fbSecondaryAuth = null;
     let fbDb = null;
     let fbModules = null;
+
+    function npsnToAuthEmail(npsn) {
+      return `${String(npsn || '').trim().toLowerCase()}@${SCHOOL_AUTH_DOMAIN}`;
+    }
+
+    function normalizeSchoolAuthPassword(rawPass) {
+      const clean = String(rawPass || '').trim();
+      if (clean.length >= 6) return clean;
+      return `${clean}_kutim`;
+    }
 
     async function initFirebaseIfProduction() {
       if (IS_PREVIEW) return;
@@ -1099,13 +1129,42 @@
           import("https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js"),
           import("https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js")
         ]);
-        const app = appMod.initializeApp(firebaseConfig);
-        fbAuth = authMod.getAuth(app);
-        fbDb = fsMod.getFirestore(app);
+        fbApp = appMod.initializeApp(firebaseConfig);
+        const secondaryApp = appMod.initializeApp(firebaseConfig, "SchoolProvisionerApp");
+        fbAuth = authMod.getAuth(fbApp);
+        fbSecondaryAuth = authMod.getAuth(secondaryApp);
+        fbDb = fsMod.getFirestore(fbApp);
         fbModules = { ...authMod, ...fsMod };
       } catch (error) {
         console.error("Gagal memuat Firebase SDK:", error);
         showToast("Gagal menginisialisasi koneksi Firebase. Periksa konfigurasi.", "error");
+      }
+    }
+
+    async function provisionSchoolFirebaseAuth(npsn, rawPassword) {
+      if (IS_PREVIEW || !fbSecondaryAuth || !fbModules) return null;
+      const { createUserWithEmailAndPassword, signInWithEmailAndPassword, updatePassword, signOut } = fbModules;
+      const email = npsnToAuthEmail(npsn);
+      const authPass = normalizeSchoolAuthPassword(rawPassword);
+
+      try {
+        const cred = await createUserWithEmailAndPassword(fbSecondaryAuth, email, authPass);
+        const uid = cred.user.uid;
+        await signOut(fbSecondaryAuth);
+        return { uid, email };
+      } catch (err) {
+        if (err.code === 'auth/email-already-in-use') {
+          try {
+            const cred = await signInWithEmailAndPassword(fbSecondaryAuth, email, authPass);
+            const uid = cred.user.uid;
+            await updatePassword(cred.user, authPass);
+            await signOut(fbSecondaryAuth);
+            return { uid, email };
+          } catch (innerErr) {
+            return { email };
+          }
+        }
+        throw err;
       }
     }
 
@@ -1145,6 +1204,13 @@
     }
 
     window.updateFilter = function(key, value) {
+      const activeEl = document.activeElement;
+      const focusId = (activeEl && activeEl.id && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA'))
+        ? activeEl.id
+        : null;
+      const selStart = focusId ? activeEl.selectionStart : null;
+      const selEnd = focusId ? activeEl.selectionEnd : null;
+
       state.filters[key] = value;
       if (key === 'schoolSearch' || key === 'schoolKecamatan' || key === 'schoolCondition') {
         state.filters.schoolPage = 1;
@@ -1153,9 +1219,24 @@
         state.filters.directoryPage = 1;
       }
       renderApp();
+
+      if (focusId) {
+        const nextEl = document.getElementById(focusId);
+        if (nextEl) {
+          nextEl.focus();
+          if (typeof selStart === 'number' && typeof nextEl.setSelectionRange === 'function') {
+            try { nextEl.setSelectionRange(selStart, selEnd ?? selStart); } catch (e) {}
+          }
+        }
+      }
     };
 
     window.handleGlobalSidebarSearch = function(query) {
+      const activeEl = document.activeElement;
+      const focusId = (activeEl && activeEl.id) ? activeEl.id : 'global-sidebar-search-input';
+      const selStart = activeEl ? activeEl.selectionStart : null;
+      const selEnd = activeEl ? activeEl.selectionEnd : null;
+
       const q = String(query || '');
       state.filters.schoolSearch = q;
       state.filters.saranaSearch = q;
@@ -1164,6 +1245,14 @@
       state.filters.schoolPage = 1;
       state.filters.directoryPage = 1;
       renderApp();
+
+      const nextEl = document.getElementById(focusId);
+      if (nextEl) {
+        nextEl.focus();
+        if (typeof selStart === 'number' && typeof nextEl.setSelectionRange === 'function') {
+          try { nextEl.setSelectionRange(selStart, selEnd ?? selStart); } catch (e) {}
+        }
+      }
     };
 
     window.switchLoginTab = function(tab) {
@@ -1306,6 +1395,8 @@
         const unsub = onSnapshot(collection(fbDb, colName), (snap) => {
           state[colName] = snap.docs.map(d => ({ id: d.id, ...d.data() }));
           renderApp();
+        }, (err) => {
+          console.warn(`Listener ${colName}:`, err?.message);
         });
         state.unsubscribers.push(unsub);
       });
@@ -1332,12 +1423,18 @@
 
       if (!fbDb || !fbModules) throw new Error("Koneksi Firebase belum siap.");
       const { collection, doc, setDoc, addDoc, updateDoc } = fbModules;
+
+      const cleanPayload = { ...payload };
+      if (collectionName === 'schools') {
+        delete cleanPayload.password;
+      }
+
       if (docId) {
-        await updateDoc(doc(fbDb, collectionName, docId), payload);
-      } else if (collectionName === 'schools' && payload.npsn) {
-        await setDoc(doc(fbDb, 'schools', payload.npsn), payload);
+        await updateDoc(doc(fbDb, collectionName, docId), cleanPayload);
+      } else if (collectionName === 'schools' && cleanPayload.npsn) {
+        await setDoc(doc(fbDb, 'schools', cleanPayload.npsn), cleanPayload);
       } else {
-        await addDoc(collection(fbDb, collectionName), payload);
+        await addDoc(collection(fbDb, collectionName), cleanPayload);
       }
     }
 
@@ -1386,21 +1483,31 @@
             state.activeTab = 'beranda';
             showToast(`Selamat datang, Operator ${matched.nama_sekolah}`, 'success');
           } else {
-            if (!fbDb || !fbModules) throw new Error("Koneksi Firebase belum siap.");
-            const { collection, query, where, getDocs } = fbModules;
-            const q = query(collection(fbDb, 'schools'), where('npsn', '==', npsn), where('password', '==', password));
-            const snap = await getDocs(q);
-            if (snap.empty) {
-              throw new Error("NPSN atau Kata Sandi sekolah tidak ditemukan / salah.");
+            if (!fbAuth || !fbDb || !fbModules) throw new Error("Koneksi Firebase belum siap.");
+            const { signInWithEmailAndPassword, doc, getDoc } = fbModules;
+            const authEmail = npsnToAuthEmail(npsn);
+            const authPass = normalizeSchoolAuthPassword(password);
+
+            const cred = await signInWithEmailAndPassword(fbAuth, authEmail, authPass);
+            const schoolRef = doc(fbDb, 'schools', npsn);
+            const schoolSnap = await getDoc(schoolRef);
+
+            if (!schoolSnap.exists()) {
+              throw new Error("Profil sekolah belum terdaftar di database. Hubungi Admin Bidang SD.");
             }
-            const schoolDoc = snap.docs[0];
-            state.user = { role: 'school', id: schoolDoc.id, ...schoolDoc.data() };
+
+            const schoolData = schoolSnap.data();
+            state.user = {
+              role: 'school',
+              uid: cred.user.uid,
+              id: schoolSnap.id,
+              ...schoolData
+            };
             state.activeTab = 'beranda';
             startRealtimeListeners();
             showToast(`Berhasil masuk sebagai ${state.user.nama_sekolah}`, 'success');
           }
         } else {
-          // Admin Bidang Pembinaan SD
           const email = form.email.value.trim();
           const password = form.password.value.trim();
 
@@ -1423,6 +1530,9 @@
           } else {
             if (!fbAuth || !fbModules) throw new Error("Firebase Authentication belum siap.");
             const { signInWithEmailAndPassword } = fbModules;
+            if (email.toLowerCase().endsWith(`@${SCHOOL_AUTH_DOMAIN}`)) {
+              throw new Error("Akun sekolah tidak diizinkan masuk melalui tab Admin.");
+            }
             const cred = await signInWithEmailAndPassword(fbAuth, email, password);
             state.user = {
               role: 'admin',
@@ -1436,7 +1546,10 @@
           }
         }
       } catch (err) {
-        showToast(err.message || 'Gagal melakukan autentikasi.', 'error');
+        const msg = (err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password' || err.code === 'auth/user-not-found')
+          ? 'NPSN/Email atau Kata Sandi salah.'
+          : (err.message || 'Gagal melakukan autentikasi.');
+        showToast(msg, 'error');
       } finally {
         state.loading = false;
         renderApp();
@@ -1445,7 +1558,7 @@
 
     window.handleLogout = async function() {
       clearFirestoreListeners();
-      if (!IS_PREVIEW && fbAuth && fbModules && state.user?.role === 'admin') {
+      if (!IS_PREVIEW && fbAuth && fbModules) {
         try { await fbModules.signOut(fbAuth); } catch (e) {}
       }
       if (!IS_PREVIEW) {
@@ -1848,7 +1961,9 @@
             </tr>
           </thead>
           <tbody>
-            ${schoolUsulan.length === 0 ? `<tr><td colspan="6" style="text-align:center;">Belum ada usulan diajukan.</td></tr>` : schoolUsulan.map((u, idx) => `
+            ${schoolUsulan.length === 0 ? `<tr><td colspan="6" style="text-align:center;">Belum ada usulan diajukan.</td></tr>` : schoolUsulan.map((u, idx) => {
+              const safeImg = sanitizeImageDataUrl(u.foto_dokumen);
+              return `
               <tr>
                 <td style="text-align:center;">${idx + 1}</td>
                 <td>${escapeHTML(u.jenis_usulan)}</td>
@@ -1858,15 +1973,15 @@
                   ${u.panjang_m && u.lebar_m ? `<br/><small>Dimensi: ${escapeHTML(u.panjang_m)}m × ${escapeHTML(u.lebar_m)}m</small>` : ''}
                 </td>
                 <td style="text-align:center;">
-                  ${u.foto_dokumen
-                    ? `<img src="${u.foto_dokumen}" alt="Lampiran Usulan" style="width:100%;max-width:110px;max-height:75px;object-fit:contain;border:1px solid #9CA3AF;padding:2px;background:#FFFFFF;display:block;margin:0 auto;" />`
+                  ${safeImg
+                    ? `<img src="${safeImg}" alt="Lampiran Usulan" style="width:100%;max-width:110px;max-height:75px;object-fit:contain;border:1px solid #9CA3AF;padding:2px;background:#FFFFFF;display:block;margin:0 auto;" />`
                     : `<span style="color:#6B7280;font-size:8pt;">-</span>`
                   }
                 </td>
                 <td style="text-align:right;">${formatRupiah(u.estimasi_biaya)}</td>
                 <td style="text-align:center;">${escapeHTML(u.status)}</td>
               </tr>
-            `).join('')}
+            `;}).join('')}
           </tbody>
         </table>
 
@@ -2078,7 +2193,9 @@
               </tr>
             </thead>
             <tbody>
-              ${filtered.length === 0 ? `<tr><td colspan="${isAdmin ? 7 : 6}" style="text-align:center;">Tidak ada data usulan.</td></tr>` : filtered.map((u, i) => `
+              ${filtered.length === 0 ? `<tr><td colspan="${isAdmin ? 7 : 6}" style="text-align:center;">Tidak ada data usulan.</td></tr>` : filtered.map((u, i) => {
+                const safeImg = sanitizeImageDataUrl(u.foto_dokumen);
+                return `
                 <tr>
                   <td style="text-align:center;">${i + 1}</td>
                   ${isAdmin ? `<td>${escapeHTML(u.nama_sekolah)}<br/><small>NPSN: ${escapeHTML(u.school_npsn)}</small></td>` : ''}
@@ -2090,8 +2207,8 @@
                     ${u.keterangan ? `<br/><small>Ket: ${escapeHTML(u.keterangan)}</small>` : ''}
                   </td>
                   <td style="text-align:center;">
-                    ${u.foto_dokumen
-                      ? `<img src="${u.foto_dokumen}" alt="${escapeHTML(u.foto_nama || 'Dokumen Usulan')}" style="width:100%;max-width:125px;max-height:85px;object-fit:contain;border:1px solid #9CA3AF;padding:2px;background:#FFFFFF;display:block;margin:0 auto;" />
+                    ${safeImg
+                      ? `<img src="${safeImg}" alt="${escapeHTML(u.foto_nama || 'Dokumen Usulan')}" style="width:100%;max-width:125px;max-height:85px;object-fit:contain;border:1px solid #9CA3AF;padding:2px;background:#FFFFFF;display:block;margin:0 auto;" />
                          <div style="font-size:7.5pt;margin-top:2px;color:#374151;">${escapeHTML(u.foto_nama || 'Lampiran Foto')}</div>`
                       : `<span style="color:#6B7280;font-size:8pt;">Tidak ada lampiran</span>`
                     }
@@ -2099,7 +2216,7 @@
                   <td style="text-align:right;">${formatRupiah(u.estimasi_biaya)}</td>
                   <td style="text-align:center;"><strong>${escapeHTML(u.status)}</strong>${u.catatan_admin ? `<br/><small>${escapeHTML(u.catatan_admin)}</small>` : ''}</td>
                 </tr>
-              `).join('')}
+              `;}).join('')}
             </tbody>
           </table>
           ${buildSignatureBlock()}
@@ -2129,7 +2246,7 @@
           <div class="fixed -top-40 -left-40 w-[520px] h-[520px] bg-emerald-500/15 rounded-full blur-[140px] pointer-events-none z-0"></div>
           <div class="fixed -bottom-40 -right-40 w-[520px] h-[520px] bg-[#A3E635]/15 rounded-full blur-[140px] pointer-events-none z-0"></div>
 
-          <!-- Split-Screen Card Container (Fit di Layar Laptop, Tablet & HP tanpa terpotong) -->
+          <!-- Split-Screen Card Container -->
           <div class="relative z-10 w-full max-w-6xl lg:h-[calc(100dvh-2rem)] lg:max-h-[760px] my-auto bg-[#141816]/95 backdrop-blur-xl border border-[#232926] rounded-[1.5rem] sm:rounded-[1.75rem] shadow-2xl overflow-hidden grid grid-cols-1 lg:grid-cols-12 items-stretch animate-fade-in">
             
             <!-- LEFT COLUMN: Visual & Branding Disdikbud Kutai Timur (7 Cols) -->
@@ -2166,11 +2283,11 @@
                   Sistem Informasi Manajemen <span class="text-transparent bg-clip-text bg-gradient-to-r from-[#A3E635] to-emerald-400">Sarana &amp; Prasarana</span> Sekolah Dasar
                 </h1>
                 <p class="animate-subtext-zoom-in text-xs sm:text-[12.5px] text-gray-300 leading-snug max-w-2xl">
-                  Platform pemetaan kondisi sarana dan prasarana jenjang Sekolah Dasar se-Kabupaten Kutai Timur.
+                  Platform pemetaan kondisi sarana dan prasarana secara terintegrasi, serta pengelolaan usulan rehabilitasi dan pengadaan jenjang Sekolah Dasar se-Kabupaten Kutai Timur.
                 </p>
               </div>
 
-              <!-- Bottom Hero Image Card (Tampil Utuh Tanpa Terpotong Atas/Bawah) -->
+              <!-- Bottom Hero Image Card -->
               <div class="relative z-10 flex-1 min-h-[175px] sm:min-h-[210px] lg:min-h-0 rounded-xl sm:rounded-2xl overflow-hidden border border-[#232926] bg-[#0B0E0D] shadow-xl w-full flex items-center justify-center group">
                 <img
                   src="${heroImageSrc}"
@@ -2179,17 +2296,6 @@
                   onerror="handleLoginHeroError(this)"
                   class="w-full h-full object-contain object-center transition-transform duration-700 group-hover:scale-[1.03]"
                 />
-                <div class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 via-black/30 to-transparent px-3 py-2 sm:px-3.5 sm:py-2.5 flex items-end justify-between gap-2 pointer-events-none">
-                  <div>
-                    <span class="inline-block px-2 py-0.5 rounded bg-[#A3E635]/20 border border-[#A3E635]/40 text-[#A3E635] text-[9.5px] font-bold uppercase tracking-wider mb-0.5">
-                      Sarpras SD Kutai Timur
-                    </span>
-                    <p class="text-[11px] sm:text-xs font-semibold text-white leading-tight">
-                      Transformasi Infrastruktur Pendidikan Dasar
-                    </p>
-                  </div>
-                  <span class="text-[10.5px] text-gray-300 font-medium hidden sm:inline">Disdikbud Kutim</span>
-                </div>
               </div>
             </div>
 
@@ -2460,8 +2566,9 @@
                 placeholder="8 digit NPSN" class="w-full px-3.5 py-2.5 rounded-xl bg-[#0B0E0D] border border-[#232926] text-sm font-mono text-white focus:border-[#A3E635] focus:outline-none" />
             </div>
             <div>
-              <label class="block text-xs text-gray-400 mb-1">Password Login Sekolah *</label>
-              <input type="text" name="password" required value="${escapeHTML(existing?.password || '123456')}"
+              <label class="block text-xs text-gray-400 mb-1">${existing ? 'Reset Password Login (Opsional)' : 'Password Login Sekolah *'}</label>
+              <input type="text" name="password" ${existing ? '' : 'required'} value="${escapeHTML(IS_PREVIEW ? (existing?.password || '123456') : (existing ? '' : '123456'))}"
+                placeholder="${existing ? 'Kosongkan jika tidak diubah' : 'Min. 6 karakter'}"
                 class="w-full px-3.5 py-2.5 rounded-xl bg-[#0B0E0D] border border-[#232926] text-sm font-mono text-white focus:border-[#A3E635] focus:outline-none" />
             </div>
           </div>
@@ -2566,6 +2673,7 @@
       e.preventDefault();
       const f = e.target;
       const npsnVal = f.npsn.value.trim();
+      const rawPassword = f.password ? f.password.value.trim() : '';
       const rawLat = f.latitude ? f.latitude.value.trim() : '';
       const rawLng = f.longitude ? f.longitude.value.trim() : '';
 
@@ -2584,7 +2692,7 @@
 
       const payload = {
         npsn: npsnVal,
-        password: f.password.value.trim(),
+        auth_email: npsnToAuthEmail(npsnVal),
         nama_sekolah: f.nama_sekolah.value.trim(),
         jenjang: 'SD',
         status_sekolah: f.status_sekolah ? f.status_sekolah.value : 'Negeri',
@@ -2598,7 +2706,17 @@
         longitude: rawLng ? parseFloat(rawLng).toFixed(6) : '',
         updated_at: new Date().toISOString().slice(0, 10)
       };
+
+      if (IS_PREVIEW && rawPassword) {
+        payload.password = rawPassword;
+      }
+
       try {
+        if (!IS_PREVIEW && state.user?.role === 'admin' && rawPassword) {
+          const authInfo = await provisionSchoolFirebaseAuth(npsnVal, rawPassword);
+          if (authInfo?.uid) payload.auth_uid = authInfo.uid;
+        }
+
         await saveRecord('schools', docId, payload);
         if (state.user?.role === 'school') {
           state.user = { ...state.user, ...payload };
@@ -2627,12 +2745,12 @@
           </div>
           <div>
             <label class="block text-xs text-gray-400 mb-1">Kata Sandi Baru *</label>
-            <input type="password" name="new_password" required minlength="3" placeholder="Masukkan kata sandi baru"
+            <input type="password" name="new_password" required minlength="6" placeholder="Minimal 6 karakter"
               class="w-full px-3.5 py-2.5 rounded-xl bg-[#0B0E0D] border border-[#232926] text-sm text-white focus:border-[#A3E635] focus:outline-none" />
           </div>
           <div>
             <label class="block text-xs text-gray-400 mb-1">Konfirmasi Kata Sandi Baru *</label>
-            <input type="password" name="confirm_password" required minlength="3" placeholder="Ulangi kata sandi baru"
+            <input type="password" name="confirm_password" required minlength="6" placeholder="Ulangi kata sandi baru"
               class="w-full px-3.5 py-2.5 rounded-xl bg-[#0B0E0D] border border-[#232926] text-sm text-white focus:border-[#A3E635] focus:outline-none" />
           </div>
           <div class="flex justify-end gap-2 pt-3 border-t border-[#232926]">
@@ -2650,27 +2768,41 @@
       const newPass = f.new_password.value.trim();
       const confirmPass = f.confirm_password.value.trim();
 
-      const currentSchool = state.schools.find(s => s.npsn === state.user?.npsn) || state.user;
-      if (oldPass !== (currentSchool?.password || '')) {
-        showToast('Kata sandi lama tidak sesuai.', 'error');
-        return;
-      }
       if (newPass !== confirmPass) {
         showToast('Konfirmasi kata sandi baru tidak cocok.', 'error');
         return;
       }
 
       try {
-        const targetId = currentSchool?.id || state.user?.npsn;
-        await saveRecord('schools', targetId, {
-          password: newPass,
-          updated_at: new Date().toISOString().slice(0, 10)
-        });
-        if (state.user) state.user.password = newPass;
+        if (IS_PREVIEW) {
+          const currentSchool = state.schools.find(s => s.npsn === state.user?.npsn) || state.user;
+          if (oldPass !== (currentSchool?.password || '')) {
+            showToast('Kata sandi lama tidak sesuai.', 'error');
+            return;
+          }
+          const targetId = currentSchool?.id || state.user?.npsn;
+          await saveRecord('schools', targetId, {
+            password: newPass,
+            updated_at: new Date().toISOString().slice(0, 10)
+          });
+          if (state.user) state.user.password = newPass;
+        } else {
+          if (!fbAuth || !fbModules || !fbAuth.currentUser) {
+            throw new Error('Sesi autentikasi tidak ditemukan. Silakan login ulang.');
+          }
+          const { EmailAuthProvider, reauthenticateWithCredential, updatePassword } = fbModules;
+          const credential = EmailAuthProvider.credential(fbAuth.currentUser.email, normalizeSchoolAuthPassword(oldPass));
+          await reauthenticateWithCredential(fbAuth.currentUser, credential);
+          await updatePassword(fbAuth.currentUser, normalizeSchoolAuthPassword(newPass));
+        }
+
         closeModal();
         showToast('Kata sandi akun sekolah berhasil diperbarui.', 'success');
       } catch (err) {
-        showToast(err.message || 'Gagal memperbarui kata sandi.', 'error');
+        const msg = err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential'
+          ? 'Kata sandi lama tidak sesuai.'
+          : (err.message || 'Gagal memperbarui kata sandi.');
+        showToast(msg, 'error');
       }
     };
 
@@ -3184,35 +3316,76 @@
       }
 
       const statusEl = document.getElementById('usulan-foto-status');
-      if (statusEl) statusEl.textContent = 'Memproses gambar...';
+      if (statusEl) statusEl.textContent = 'Mengoptimalkan ukuran gambar...';
 
       const applyProcessedImage = function(dataUrl) {
+        const safeUrl = sanitizeImageDataUrl(dataUrl);
+        if (!safeUrl || getByteLengthUtf8(safeUrl) > MAX_FIRESTORE_IMAGE_CHARS) {
+          showToast('Ukuran gambar masih terlalu besar untuk disimpan. Silakan pilih gambar lain yang lebih ringan.', 'error');
+          if (statusEl) statusEl.textContent = 'Ukuran gambar terlalu besar';
+          e.target.value = '';
+          return;
+        }
         const hiddenData = document.getElementById('usulan-foto-data');
         const hiddenName = document.getElementById('usulan-foto-name');
         const previewBox = document.getElementById('usulan-foto-preview-box');
         const previewImg = document.getElementById('usulan-foto-preview-img');
         const filenameEl = document.getElementById('usulan-foto-filename');
 
-        if (hiddenData) hiddenData.value = dataUrl;
+        const sizeKb = Math.round(getByteLengthUtf8(safeUrl) / 1024);
+        if (hiddenData) hiddenData.value = safeUrl;
         if (hiddenName) hiddenName.value = file.name;
-        if (previewImg) previewImg.src = dataUrl;
-        if (filenameEl) filenameEl.textContent = file.name;
+        if (previewImg) previewImg.src = safeUrl;
+        if (filenameEl) filenameEl.textContent = `${file.name} (${sizeKb} KB)`;
         if (previewBox) previewBox.classList.remove('hidden');
-        if (statusEl) statusEl.textContent = 'Gambar siap dikirim ke Admin';
-        showToast('Dokumen gambar berhasil dimuat dan siap dikirim.', 'success');
+        if (statusEl) statusEl.textContent = `Gambar siap dikirim (${sizeKb} KB)`;
+        showToast('Dokumen gambar berhasil dioptimalkan dan siap dikirim.', 'success');
+      };
+
+      const compressImageToSafeLimit = function(img) {
+        let maxDim = 960;
+        let quality = 0.78;
+        let bestDataUrl = '';
+
+        for (let attempt = 0; attempt < 8; attempt++) {
+          let width = img.width || maxDim;
+          let height = img.height || maxDim;
+          if (width > maxDim || height > maxDim) {
+            if (width > height) {
+              height = Math.max(1, Math.round((height * maxDim) / width));
+              width = maxDim;
+            } else {
+              width = Math.max(1, Math.round((width * maxDim) / height));
+              height = maxDim;
+            }
+          }
+
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          // Isi latar putih agar gambar PNG transparan tidak menjadi hitam saat dikonversi ke JPEG
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(0, 0, width, height);
+          ctx.drawImage(img, 0, 0, width, height);
+
+          bestDataUrl = canvas.toDataURL('image/jpeg', quality);
+          if (getByteLengthUtf8(bestDataUrl) <= MAX_FIRESTORE_IMAGE_CHARS) {
+            return bestDataUrl;
+          }
+
+          quality = Math.max(0.35, quality - 0.12);
+          maxDim = Math.max(420, Math.round(maxDim * 0.8));
+        }
+
+        return bestDataUrl;
       };
 
       const reader = new FileReader();
       reader.onload = function(ev) {
         const rawDataUrl = ev.target.result;
 
-        // Untuk SVG atau GIF animasi, simpan langsung agar vektor/animasi tetap utuh
-        if (file.type === 'image/svg+xml' || file.type === 'image/gif' || /\.(svg|gif)$/i.test(file.name)) {
-          if (rawDataUrl.length > 900000) {
-            showToast('Ukuran file GIF/SVG terlalu besar (maksimal ~650 KB).', 'error');
-            if (statusEl) statusEl.textContent = 'Ukuran gambar terlalu besar';
-            return;
-          }
+        if ((file.type === 'image/svg+xml' || /\.svg$/i.test(file.name)) && getByteLengthUtf8(rawDataUrl) <= MAX_FIRESTORE_IMAGE_CHARS) {
           applyProcessedImage(rawDataUrl);
           return;
         }
@@ -3220,39 +3393,14 @@
         const img = new Image();
         img.onload = function() {
           try {
-            const maxDim = 960;
-            let width = img.width || 960;
-            let height = img.height || 720;
-            if (width > maxDim || height > maxDim) {
-              if (width > height) {
-                height = Math.round((height * maxDim) / width);
-                width = maxDim;
-              } else {
-                width = Math.round((width * maxDim) / height);
-                height = maxDim;
-              }
-            }
-
-            const canvas = document.createElement('canvas');
-            canvas.width = width;
-            canvas.height = height;
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(img, 0, 0, width, height);
-
-            const outputMime = (file.type === 'image/png' || file.type === 'image/webp') ? file.type : 'image/jpeg';
-            const compressedDataUrl = canvas.toDataURL(outputMime, 0.8);
-            applyProcessedImage(compressedDataUrl);
+            const compressed = compressImageToSafeLimit(img);
+            applyProcessedImage(compressed);
           } catch (canvasErr) {
             applyProcessedImage(rawDataUrl);
           }
         };
         img.onerror = function() {
-          if (rawDataUrl.length <= 950000) {
-            applyProcessedImage(rawDataUrl);
-          } else {
-            showToast('Format gambar tidak dapat dikompresi otomatis dan ukurannya terlalu besar (>700 KB).', 'error');
-            if (statusEl) statusEl.textContent = 'Gagal memuat gambar';
-          }
+          applyProcessedImage(rawDataUrl);
         };
         img.src = rawDataUrl;
       };
@@ -3277,7 +3425,8 @@
 
     window.openUsulanImageViewer = function(docId) {
       const item = state.usulan.find(u => u.id === docId);
-      if (!item || !item.foto_dokumen) return;
+      const safeImg = sanitizeImageDataUrl(item?.foto_dokumen);
+      if (!item || !safeImg) return;
       openModal(`
         <div class="p-6 space-y-4">
           <div class="flex items-center justify-between pb-3 border-b border-[#232926]">
@@ -3290,7 +3439,7 @@
             </button>
           </div>
           <div class="rounded-2xl overflow-hidden border border-[#232926] bg-[#0B0E0D] flex items-center justify-center max-h-[68vh]">
-            <img src="${item.foto_dokumen}" alt="${escapeHTML(item.foto_nama || 'Dokumen Usulan')}" class="max-h-[68vh] w-auto object-contain" />
+            <img src="${safeImg}" alt="${escapeHTML(item.foto_nama || 'Dokumen Usulan')}" class="max-h-[68vh] w-auto object-contain" />
           </div>
           <div class="flex items-center justify-between text-xs text-gray-400 pt-1">
             <span>File: <strong class="text-white">${escapeHTML(item.foto_nama || 'Lampiran Gambar')}</strong></span>
@@ -3317,6 +3466,12 @@
         ? `${qty} ${satuan} (${panjangVal}m × ${lebarVal}m = ${luasHitung.toFixed(2).replace(/\.00$/, '')} m²)`
         : `${qty} ${satuan}`;
 
+      const safeFotoData = f.foto_dokumen ? sanitizeImageDataUrl(f.foto_dokumen.value) : '';
+      if (safeFotoData && getByteLengthUtf8(safeFotoData) > MAX_FIRESTORE_IMAGE_CHARS) {
+        showToast('Ukuran gambar melebihi batas database. Silakan pilih ulang gambar.', 'error');
+        return;
+      }
+
       const payload = {
         school_npsn: state.user.npsn,
         nama_sekolah: state.user.nama_sekolah,
@@ -3329,8 +3484,8 @@
         estimasi_biaya: Number(f.estimasi_biaya.value) || 0,
         prioritas: f.prioritas.value,
         keterangan: f.keterangan.value.trim(),
-        foto_dokumen: f.foto_dokumen ? f.foto_dokumen.value : '',
-        foto_nama: f.foto_nama ? f.foto_nama.value : '',
+        foto_dokumen: safeFotoData,
+        foto_nama: safeFotoData && f.foto_nama ? f.foto_nama.value : '',
         status: 'Menunggu',
         catatan_admin: '',
         created_at: new Date().toISOString().slice(0, 10)
@@ -3347,6 +3502,7 @@
     window.openVerifyUsulanModal = function(docId) {
       const item = state.usulan.find(u => u.id === docId);
       if (!item) return;
+      const safeImg = sanitizeImageDataUrl(item.foto_dokumen);
       openModal(`
         <form onsubmit="submitVerifyUsulan(event, decodeURIComponent('${safeArg(docId)}'))" class="p-6 space-y-4 max-h-[88vh] overflow-y-auto">
           <div class="flex items-center justify-between pb-3 border-b border-[#232926]">
@@ -3362,7 +3518,7 @@
             ${item.panjang_m && item.lebar_m ? `<p class="text-emerald-400 font-semibold">Ukuran Dimensi: Panjang ${escapeHTML(item.panjang_m)} m × Lebar ${escapeHTML(item.lebar_m)} m</p>` : ''}
             <p class="text-gray-300 pt-1">${escapeHTML(item.keterangan || '')}</p>
           </div>
-          ${item.foto_dokumen ? `
+          ${safeImg ? `
             <div class="p-3 rounded-xl bg-[#0B0E0D] border border-[#232926] space-y-2">
               <div class="flex items-center justify-between text-xs">
                 <span class="font-semibold text-[#A3E635] flex items-center gap-1.5">
@@ -3374,7 +3530,7 @@
                 </button>
               </div>
               <div class="rounded-xl overflow-hidden border border-[#232926] bg-[#141816] flex items-center justify-center max-h-52">
-                <img src="${item.foto_dokumen}" alt="Lampiran Dokumen Usulan" class="max-h-52 w-auto object-contain cursor-pointer" onclick="openUsulanImageViewer(decodeURIComponent('${safeArg(item.id)}'))" />
+                <img src="${safeImg}" alt="Lampiran Dokumen Usulan" class="max-h-52 w-auto object-contain cursor-pointer" onclick="openUsulanImageViewer(decodeURIComponent('${safeArg(item.id)}'))" />
               </div>
             </div>
           ` : ''}
@@ -3447,7 +3603,7 @@
     // =========================================================================
     function generatePasswordFromNpsn(npsn, mode = 'npsn_acak') {
       const cleanNpsn = String(npsn || '').trim();
-      if (mode === 'sama_npsn') return cleanNpsn;
+      if (mode === 'sama_npsn') return cleanNpsn.length >= 6 ? cleanNpsn : `${cleanNpsn}00`;
       if (mode === 'sd_npsn') return `SD${cleanNpsn}`;
       const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
       let suffix = '';
@@ -3500,7 +3656,7 @@
               </div>
               <div>
                 <h3 class="text-lg font-bold text-white">Generate & Import Akun NPSN</h3>
-                <p class="text-xs text-gray-400">Buat/reset akun satuan atau import massal hingga 300+ SD sekaligus</p>
+                <p class="text-xs text-gray-400">Buat/reset akun satuan terenkripsi Firebase Auth atau import massal hingga 300+ SD</p>
               </div>
             </div>
             <button type="button" onclick="closeModal()" class="p-1.5 rounded-xl bg-[#0B0E0D] text-gray-400 hover:text-white">
@@ -3528,7 +3684,7 @@
               </div>
             </div>
             <div>
-              <label class="block text-xs text-gray-400 mb-1">Hasil Password *</label>
+              <label class="block text-xs text-gray-400 mb-1">Hasil Password (Salin sebelum disimpan) *</label>
               <div class="flex items-center gap-2">
                 <input type="text" id="gen-password" name="password" required placeholder="Otomatis terisi..."
                   class="flex-1 px-3 py-2 rounded-xl bg-[#141816] border border-[#A3E635]/50 text-sm font-mono font-bold text-[#A3E635] focus:outline-none" />
@@ -3551,7 +3707,7 @@
             </div>
             <div class="flex justify-end pt-1">
               <button type="submit" class="px-4 py-2 rounded-xl bg-[#A3E635] text-black text-xs font-bold hover:bg-lime-300">
-                Simpan Akun Satuan
+                Simpan & Daftarkan Akun
               </button>
             </div>
           </form>
@@ -3561,7 +3717,7 @@
               <p class="text-xs font-bold uppercase tracking-wider text-emerald-400">2. Import Massal dari Excel / CSV (Hingga 300+ SD)</p>
               <span class="text-[11px] text-gray-400">Format: NPSN | Nama Sekolah | Kecamatan</span>
             </div>
-            <p class="text-[11px] text-gray-400">Salin 3 kolom dari Excel (NPSN, Nama Sekolah, Kecamatan) lalu tempel di bawah ini (1 baris per sekolah). Password otomatis dibuatkan dengan pola <strong class="text-white">SD+NPSN</strong>.</p>
+            <p class="text-[11px] text-gray-400">Salin 3 kolom dari Excel (NPSN, Nama Sekolah, Kecamatan) lalu tempel di bawah ini (1 baris per sekolah). Akun otomatis terdaftar dengan password default <strong class="text-white">SD+NPSN</strong>.</p>
             <textarea name="bulk_text" rows="4" required placeholder="30400812&#9;SDN 012 Sangatta Utara&#9;Kec. Sangatta Utara&#10;30400813&#9;SDN 002 Bengalon&#9;Kec. Bengalon"
               class="w-full px-3 py-2 rounded-xl bg-[#141816] border border-[#232926] text-xs font-mono text-white focus:border-emerald-400 focus:outline-none"></textarea>
             <div class="flex flex-wrap items-center justify-between gap-2 pt-1">
@@ -3592,18 +3748,28 @@
       const today = new Date().toISOString().slice(0, 10);
 
       try {
+        let authInfo = null;
+        if (!IS_PREVIEW) {
+          showToast('Mendaftarkan akun ke Firebase Authentication...', 'info');
+          authInfo = await provisionSchoolFirebaseAuth(npsn, password);
+        }
+
         if (existingSchool) {
-          await saveRecord('schools', existingSchool.id, {
-            password,
+          const updatePayload = {
             nama_sekolah,
             kecamatan: kecamatan || existingSchool.kecamatan,
+            auth_email: npsnToAuthEmail(npsn),
             updated_at: today
-          });
-          showToast(`Password akun NPSN ${npsn} (${nama_sekolah}) berhasil diperbarui!`, 'success');
+          };
+          if (authInfo?.uid) updatePayload.auth_uid = authInfo.uid;
+          if (IS_PREVIEW) updatePayload.password = password;
+
+          await saveRecord('schools', existingSchool.id, updatePayload);
+          showToast(`Akun NPSN ${npsn} (${nama_sekolah}) berhasil diperbarui!`, 'success');
         } else {
-          await saveRecord('schools', null, {
+          const newPayload = {
             npsn,
-            password,
+            auth_email: npsnToAuthEmail(npsn),
             nama_sekolah,
             jenjang: 'SD',
             status_sekolah: 'Negeri',
@@ -3614,7 +3780,11 @@
             jumlah_siswa: 0,
             jumlah_rombel: 0,
             updated_at: today
-          });
+          };
+          if (authInfo?.uid) newPayload.auth_uid = authInfo.uid;
+          if (IS_PREVIEW) newPayload.password = password;
+
+          await saveRecord('schools', null, newPayload);
           showToast(`Akun baru NPSN ${npsn} (${nama_sekolah}) berhasil dibuat!`, 'success');
         }
         closeModal();
@@ -3648,10 +3818,11 @@
         }
         existingNpsnSet.add(npsn);
 
-        newRecords.push({
+        const defaultPass = `SD${npsn}`;
+        const rec = {
           id: npsn,
           npsn,
-          password: `SD${npsn}`,
+          auth_email: npsnToAuthEmail(npsn),
           nama_sekolah,
           jenjang: 'SD',
           status_sekolah: nama_sekolah.toUpperCase().includes('SDN') || nama_sekolah.toUpperCase().includes('NEGERI') ? 'Negeri' : 'Swasta',
@@ -3664,25 +3835,30 @@
           jumlah_siswa: 0,
           jumlah_rombel: 0,
           updated_at: today
-        });
+        };
+        if (IS_PREVIEW) rec.password = defaultPass;
+        newRecords.push({ rec, defaultPass });
       }
 
       if (newRecords.length > 0) {
         if (IS_PREVIEW) {
-          state.schools = [...newRecords, ...state.schools];
+          state.schools = [...newRecords.map(x => x.rec), ...state.schools];
           broadcastPreviewState(`Import massal ${newRecords.length} Sekolah Dasar`);
         } else if (fbDb && fbModules?.writeBatch) {
+          showToast(`Memproses ${newRecords.length} akun sekolah ke Firebase Auth & Firestore...`, 'info');
           const { writeBatch, doc } = fbModules;
+          for (const item of newRecords) {
+            try {
+              const authInfo = await provisionSchoolFirebaseAuth(item.rec.npsn, item.defaultPass);
+              if (authInfo?.uid) item.rec.auth_uid = authInfo.uid;
+            } catch (authErr) {}
+          }
           for (let i = 0; i < newRecords.length; i += 450) {
             const batch = writeBatch(fbDb);
-            newRecords.slice(i, i + 450).forEach(rec => {
-              batch.set(doc(fbDb, 'schools', rec.npsn), rec);
+            newRecords.slice(i, i + 450).forEach(item => {
+              batch.set(doc(fbDb, 'schools', item.rec.npsn), item.rec);
             });
             await batch.commit();
-          }
-        } else {
-          for (const rec of newRecords) {
-            await saveRecord('schools', null, rec);
           }
         }
       }
@@ -3712,6 +3888,7 @@
             id: npsn,
             npsn,
             password: `SD${npsn}`,
+            auth_email: npsnToAuthEmail(npsn),
             nama_sekolah: isSwasta ? `SD Swasta YPPSB / IT ${noUrut} ${kecShort}` : `SD Negeri ${noUrut} ${kecShort}`,
             jenjang: 'SD',
             status_sekolah: isSwasta ? 'Swasta' : 'Negeri',
@@ -3743,15 +3920,15 @@
       });
 
       const html = `
-        ${buildKopSurat('DAFTAR AKUN LOGIN OPERATOR SEKOLAH DASAR (USER NPSN & PASSWORD)', `Total Akun Terdaftar: ${filtered.length} Sekolah Dasar`)}
+        ${buildKopSurat('DAFTAR AKUN LOGIN OPERATOR SEKOLAH DASAR (USER NPSN)', `Total Akun Terdaftar: ${filtered.length} Sekolah Dasar`)}
         <table>
           <thead>
             <tr>
               <th style="width:6%;text-align:center;">No</th>
-              <th style="width:32%;">Nama Sekolah Dasar</th>
+              <th style="width:34%;">Nama Sekolah Dasar</th>
               <th style="width:20%;">Kecamatan</th>
-              <th style="width:20%;text-align:center;">Username (NPSN)</th>
-              <th style="width:22%;text-align:center;">Password Login</th>
+              <th style="width:18%;text-align:center;">Username (NPSN)</th>
+              <th style="width:22%;text-align:center;">Status Autentikasi</th>
             </tr>
           </thead>
           <tbody>
@@ -3761,7 +3938,7 @@
                 <td>${escapeHTML(s.nama_sekolah)}</td>
                 <td>${escapeHTML(s.kecamatan || '-')}</td>
                 <td style="text-align:center;font-family:monospace;font-weight:bold;">${escapeHTML(s.npsn)}</td>
-                <td style="text-align:center;font-family:monospace;font-weight:bold;">${escapeHTML(s.password || '-')}</td>
+                <td style="text-align:center;font-size:8.5pt;">${IS_PREVIEW ? escapeHTML(s.password || '-') : 'Terenkripsi (Firebase Auth)'}</td>
               </tr>
             `).join('')}
           </tbody>
@@ -4013,7 +4190,7 @@
                 <div class="flex flex-wrap items-center gap-2.5">
                   <div class="relative flex-1 sm:flex-initial">
                     <i data-lucide="search" class="w-4 h-4 text-gray-500 absolute left-3 top-1/2 -translate-y-1/2"></i>
-                    <input type="text" value="${escapeHTML(state.filters.schoolSearch)}" oninput="updateFilter('schoolSearch', this.value)"
+                    <input type="text" id="beranda-school-search-input" value="${escapeHTML(state.filters.schoolSearch)}" oninput="updateFilter('schoolSearch', this.value)"
                       placeholder="Cari NPSN / Sekolah..."
                       class="w-full sm:w-52 pl-9 pr-3 py-2 rounded-xl bg-[#0B0E0D] border border-[#232926] text-xs text-white focus:border-[#A3E635] focus:outline-none" />
                   </div>
@@ -4180,7 +4357,6 @@
 
             <form onsubmit="submitSchoolForm(event, decodeURIComponent('${safeArg(school.id || school.npsn)}'))" class="bento-card p-6 space-y-5">
               <input type="hidden" name="npsn" value="${escapeHTML(school.npsn)}" />
-              <input type="hidden" name="password" value="${escapeHTML(school.password || '')}" />
 
               <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div class="sm:col-span-2">
@@ -4327,7 +4503,7 @@
           <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
             <div>
               <h2 class="text-2xl font-bold text-white">Direktori & Manajemen Akun SD (${filtered.length} / ${state.schools.length})</h2>
-              <p class="text-xs sm:text-sm text-gray-400 mt-0.5">Kelola profil SD, generate/import akun login NPSN massal, & cetak daftar kredensial operator</p>
+              <p class="text-xs sm:text-sm text-gray-400 mt-0.5">Kelola profil SD, generate/import akun login NPSN massal, & cetak daftar akun operator</p>
             </div>
             <div class="flex flex-wrap items-center gap-2">
               <button onclick="openGenerateAccountModal()" class="px-3.5 py-2.5 rounded-xl bg-emerald-500/15 border border-emerald-400/40 hover:bg-emerald-500/25 text-emerald-300 text-xs font-bold flex items-center gap-1.5 transition-colors">
@@ -4348,7 +4524,7 @@
           <div class="bento-card p-4 flex flex-col md:flex-row md:items-center gap-3">
             <div class="relative flex-1">
               <i data-lucide="search" class="w-4 h-4 text-gray-500 absolute left-3.5 top-1/2 -translate-y-1/2"></i>
-              <input type="text" value="${escapeHTML(state.filters.schoolSearch)}" oninput="updateFilter('schoolSearch', this.value)"
+              <input type="text" id="directory-school-search-input" value="${escapeHTML(state.filters.schoolSearch)}" oninput="updateFilter('schoolSearch', this.value)"
                 placeholder="Cari NPSN, nama SD, atau kecamatan..."
                 class="w-full pl-10 pr-4 py-2.5 rounded-xl bg-[#0B0E0D] border border-[#232926] text-xs sm:text-sm text-white focus:border-[#A3E635] focus:outline-none" />
             </div>
@@ -4395,13 +4571,20 @@
                     ` : ''}
 
                     <div class="mt-3 px-3 py-2 rounded-xl bg-[#0B0E0D] border border-[#232926] flex items-center justify-between text-xs">
-                      <span class="text-gray-400">Password Login:</span>
-                      <div class="flex items-center gap-2">
-                        <span class="font-mono font-bold ${isRevealed ? 'text-[#A3E635]' : 'text-gray-300'}">${isRevealed ? escapeHTML(s.password || '-') : '••••••••'}</span>
-                        <button type="button" onclick="togglePasswordVisibility('${escapeHTML(s.npsn)}')" title="Tampilkan/Sembunyikan Password" class="text-gray-400 hover:text-white">
-                          <i data-lucide="${isRevealed ? 'eye-off' : 'eye'}" class="w-3.5 h-3.5"></i>
-                        </button>
-                      </div>
+                      <span class="text-gray-400">Status Akun:</span>
+                      ${IS_PREVIEW ? `
+                        <div class="flex items-center gap-2">
+                          <span class="font-mono font-bold ${isRevealed ? 'text-[#A3E635]' : 'text-gray-300'}">${isRevealed ? escapeHTML(s.password || '-') : '••••••••'}</span>
+                          <button type="button" onclick="togglePasswordVisibility('${escapeHTML(s.npsn)}')" title="Tampilkan/Sembunyikan Password" class="text-gray-400 hover:text-white">
+                            <i data-lucide="${isRevealed ? 'eye-off' : 'eye'}" class="w-3.5 h-3.5"></i>
+                          </button>
+                        </div>
+                      ` : `
+                        <span class="inline-flex items-center gap-1 text-emerald-400 font-semibold">
+                          <i data-lucide="shield-check" class="w-3.5 h-3.5"></i>
+                          <span>Terenkripsi Auth</span>
+                        </span>
+                      `}
                     </div>
 
                     <div class="mt-3 pt-3 border-t border-[#232926] grid grid-cols-2 gap-2 text-xs">
@@ -4500,7 +4683,7 @@
           <div class="bento-card p-4 flex flex-col md:flex-row md:items-center gap-3 flex-wrap">
             <div class="relative flex-1 min-w-[200px]">
               <i data-lucide="search" class="w-4 h-4 text-gray-500 absolute left-3.5 top-1/2 -translate-y-1/2"></i>
-              <input type="text" value="${escapeHTML(state.filters.saranaSearch)}" oninput="updateFilter('saranaSearch', this.value)"
+              <input type="text" id="sarana-search-input" value="${escapeHTML(state.filters.saranaSearch)}" oninput="updateFilter('saranaSearch', this.value)"
                 placeholder="Cari nama barang, ruang, atau sekolah..."
                 class="w-full pl-10 pr-4 py-2 rounded-xl bg-[#0B0E0D] border border-[#232926] text-xs sm:text-sm text-white focus:border-[#A3E635] focus:outline-none" />
             </div>
@@ -4633,7 +4816,7 @@
           <div class="bento-card p-4 flex flex-col md:flex-row md:items-center gap-3">
             <div class="relative flex-1">
               <i data-lucide="search" class="w-4 h-4 text-gray-500 absolute left-3.5 top-1/2 -translate-y-1/2"></i>
-              <input type="text" value="${escapeHTML(state.filters.prasaranaSearch)}" oninput="updateFilter('prasaranaSearch', this.value)"
+              <input type="text" id="prasarana-search-input" value="${escapeHTML(state.filters.prasaranaSearch)}" oninput="updateFilter('prasaranaSearch', this.value)"
                 placeholder="Cari nama ruang, jenis prasarana, atau sekolah..."
                 class="w-full pl-10 pr-4 py-2 rounded-xl bg-[#0B0E0D] border border-[#232926] text-xs sm:text-sm text-white focus:border-[#A3E635] focus:outline-none" />
             </div>
@@ -4763,7 +4946,7 @@
           <div class="bento-card p-4 flex flex-col md:flex-row md:items-center gap-3">
             <div class="relative flex-1">
               <i data-lucide="search" class="w-4 h-4 text-gray-500 absolute left-3.5 top-1/2 -translate-y-1/2"></i>
-              <input type="text" value="${escapeHTML(state.filters.usulanSearch)}" oninput="updateFilter('usulanSearch', this.value)"
+              <input type="text" id="usulan-search-input" value="${escapeHTML(state.filters.usulanSearch)}" oninput="updateFilter('usulanSearch', this.value)"
                 placeholder="Cari judul usulan atau nama sekolah..."
                 class="w-full pl-10 pr-4 py-2 rounded-xl bg-[#0B0E0D] border border-[#232926] text-xs sm:text-sm text-white focus:border-[#A3E635] focus:outline-none" />
             </div>
@@ -4789,6 +4972,7 @@
                 : 'bg-amber-500/15 text-amber-400 border-amber-500/30';
 
               const prioColor = u.prioritas === 'Tinggi' ? 'text-red-400' : u.prioritas === 'Sedang' ? 'text-amber-400' : 'text-emerald-400';
+              const safeImg = sanitizeImageDataUrl(u.foto_dokumen);
 
               return `
                 <div class="bento-card p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
@@ -4809,9 +4993,9 @@
                       <span>Volume: <strong class="text-white">${escapeHTML(u.volume)}</strong></span>
                       <span>Estimasi Biaya: <strong class="text-[#A3E635]">${formatRupiah(u.estimasi_biaya)}</strong></span>
                     </div>
-                    ${u.foto_dokumen ? `
+                    ${safeImg ? `
                       <div class="mt-2.5 p-2.5 rounded-xl bg-[#0B0E0D] border border-[#232926] flex items-center gap-3 max-w-md">
-                        <img src="${u.foto_dokumen}" alt="Lampiran Foto Usulan"
+                        <img src="${safeImg}" alt="Lampiran Foto Usulan"
                           onclick="openUsulanImageViewer(decodeURIComponent('${safeArg(u.id)}'))"
                           class="w-16 h-12 rounded-lg object-cover border border-[#232926] cursor-pointer shrink-0 hover:opacity-90" />
                         <div class="min-w-0 flex-1">
@@ -4894,7 +5078,7 @@
 
               <div class="relative">
                 <i data-lucide="search" class="w-3.5 h-3.5 text-gray-500 absolute left-3 top-1/2 -translate-y-1/2"></i>
-                <input type="text" placeholder="Cari cepat..." oninput="handleGlobalSidebarSearch(this.value)"
+                <input type="text" id="global-sidebar-search-input" value="${escapeHTML(state.filters.schoolSearch)}" placeholder="Cari cepat..." oninput="handleGlobalSidebarSearch(this.value)"
                   class="w-full pl-8 pr-3 py-2 rounded-xl bg-[#0B0E0D] border border-[#232926] text-xs text-white placeholder-gray-600 focus:border-[#A3E635] focus:outline-none" />
               </div>
 
