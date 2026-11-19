@@ -49,6 +49,35 @@
   <!-- Dynamic PWA Manifest Link (Injected via JS Data URI) -->
   <link id="pwa-manifest-link" rel="manifest" />
 
+  <!-- Sinkronisasi Tema Instan Sebelum First Paint (Mencegah Kedipan Warna Awal) -->
+  <script>
+    (function() {
+      var presets = {
+        lime: ['#A3E635', '163, 230, 53', '#BEF264', '#10B981', '16, 185, 129', '#0B0E0D', '#141816', '#1A201D', '#232926', '#000000'],
+        ocean: ['#38BDF8', '56, 189, 248', '#7DD3FC', '#2563EB', '37, 99, 235', '#080D14', '#101826', '#162235', '#1E2D45', '#04121E'],
+        gold: ['#FBBF24', '251, 191, 36', '#FCD34D', '#F59E0B', '245, 158, 11', '#0F0D0A', '#191611', '#231E17', '#30291F', '#140D02'],
+        emerald: ['#34D399', '52, 211, 153', '#6EE7B7', '#059669', '5, 150, 105', '#07110E', '#0F1E19', '#152A23', '#1E3A31', '#031710'],
+        violet: ['#C084FC', '192, 132, 252', '#D8B4FE', '#8B5CF6', '139, 92, 246', '#0D0A14', '#161122', '#201831', '#2D2244', '#130521'],
+        rose: ['#FB7185', '251, 113, 133', '#FDA4AF', '#E11D48', '225, 29, 72', '#120A0D', '#1D1115', '#28171D', '#382028', '#1A0409']
+      };
+      try {
+        var key = localStorage.getItem('sim_sarpras_theme_v1') || 'lime';
+        var t = presets[key] || presets.lime;
+        var r = document.documentElement.style;
+        r.setProperty('--theme-accent', t[0]);
+        r.setProperty('--theme-accent-rgb', t[1]);
+        r.setProperty('--theme-accent-hover', t[2]);
+        r.setProperty('--theme-secondary', t[3]);
+        r.setProperty('--theme-secondary-rgb', t[4]);
+        r.setProperty('--theme-canvas', t[5]);
+        r.setProperty('--theme-surface', t[6]);
+        r.setProperty('--theme-surface-hover', t[7]);
+        r.setProperty('--theme-border', t[8]);
+        r.setProperty('--theme-on-accent', t[9]);
+      } catch (e) {}
+    })();
+  </script>
+
   <style>
     /* Variabel Tema Dinamis (Default: Lime Borneo) */
     :root {
@@ -187,6 +216,10 @@
       animation:
         heroZoomIn 0.75s cubic-bezier(0.16, 1, 0.3, 1) forwards,
         heroPulseZoom 4.8s ease-in-out 0.85s infinite;
+    }
+    .animate-text-pulse-only {
+      transform-origin: center center;
+      animation: heroPulseZoom 4.8s ease-in-out infinite;
     }
     .animate-subtext-zoom-in {
       opacity: 0;
@@ -435,7 +468,7 @@
 
     // PASTE FIREBASE CONFIG ANDA DI SINI
     const firebaseConfig = {
-       apiKey: "AIzaSyCg-3XLJwM4EKuLfy_vNa6ZptfPuCG6ups",
+      apiKey: "AIzaSyCg-3XLJwM4EKuLfy_vNa6ZptfPuCG6ups",
   authDomain: "siprasdikdas.firebaseapp.com",
   projectId: "siprasdikdas",
   storageBucket: "siprasdikdas.firebasestorage.app",
@@ -1067,6 +1100,7 @@
     let fbAuth = null;
     let fbDb = null;
     let fbModules = null;
+    let firebaseInitPromise = null;
 
     async function initFirebaseIfProduction() {
       if (IS_PREVIEW) return;
@@ -1343,6 +1377,15 @@
       state.unsubscribers = [];
     }
 
+    let realtimeRenderTimer = null;
+    function scheduleRealtimeRender() {
+      if (realtimeRenderTimer) clearTimeout(realtimeRenderTimer);
+      realtimeRenderTimer = setTimeout(() => {
+        realtimeRenderTimer = null;
+        renderApp();
+      }, 90);
+    }
+
     function startRealtimeListeners() {
       if (IS_PREVIEW || !fbDb || !fbModules) return;
       clearFirestoreListeners();
@@ -1350,17 +1393,22 @@
       ['schools', 'sarana', 'prasarana', 'usulan'].forEach(colName => {
         const unsub = onSnapshot(
           collection(fbDb, colName),
-          { includeMetadataChanges: true },
           (snap) => {
-            state[colName] = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+            const nextList = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+            const prevSerialized = JSON.stringify(state[colName]);
+            const nextSerialized = JSON.stringify(nextList);
+
             state.syncStatus.connected = true;
             state.syncStatus.lastSyncAt = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+            if (prevSerialized === nextSerialized) return;
+            state[colName] = nextList;
 
             if (state.user?.role === 'school' && colName === 'schools') {
               const updatedMe = state.schools.find(s => s.npsn === state.user.npsn);
               if (updatedMe) state.user = { ...state.user, ...updatedMe };
             }
-            renderApp();
+            scheduleRealtimeRender();
           },
           (err) => {
             console.error(`Gagal sinkronisasi real-time koleksi ${colName}:`, err);
@@ -1469,6 +1517,9 @@
       renderApp();
 
       try {
+        if (!IS_PREVIEW && firebaseInitPromise) {
+          await firebaseInitPromise;
+        }
         if (state.loginTab === 'school') {
           const npsn = form.npsn.value.trim();
           const password = form.password.value.trim();
@@ -2498,6 +2549,10 @@
     function renderLoginView() {
       const isSchool = state.loginTab === 'school';
       const heroImageSrc = getEmbeddedLoginHeroSrc();
+      const animCard = state._shouldAnimate ? 'animate-fade-in' : '';
+      const animBadge = state._shouldAnimate ? 'animate-badge-zoom-in' : '';
+      const animTitle = state._shouldAnimate ? 'animate-text-zoom-in' : 'animate-text-pulse-only';
+      const animSub = state._shouldAnimate ? 'animate-subtext-zoom-in' : '';
       return `
         <div class="min-h-[100dvh] lg:h-[100dvh] w-full overflow-y-auto lg:overflow-hidden bg-[#0B0E0D] flex items-center justify-center p-2.5 sm:p-4 lg:p-4 relative">
           <img
@@ -2512,7 +2567,7 @@
           <div class="fixed -top-40 -left-40 w-[520px] h-[520px] bg-emerald-500/15 rounded-full blur-[140px] pointer-events-none z-0"></div>
           <div class="fixed -bottom-40 -right-40 w-[520px] h-[520px] bg-[#A3E635]/15 rounded-full blur-[140px] pointer-events-none z-0"></div>
 
-          <div class="relative z-10 w-full max-w-6xl lg:h-[calc(100dvh-2rem)] lg:max-h-[760px] my-auto bg-[#141816]/95 backdrop-blur-xl border border-[#232926] rounded-[1.5rem] sm:rounded-[1.75rem] shadow-2xl overflow-hidden grid grid-cols-1 lg:grid-cols-12 items-stretch animate-fade-in">
+          <div class="relative z-10 w-full max-w-6xl lg:h-[calc(100dvh-2rem)] lg:max-h-[760px] my-auto bg-[#141816]/95 backdrop-blur-xl border border-[#232926] rounded-[1.5rem] sm:rounded-[1.75rem] shadow-2xl overflow-hidden grid grid-cols-1 lg:grid-cols-12 items-stretch ${animCard}">
             
             <!-- LEFT COLUMN: Rata Tengah (Center Aligned) -->
             <div class="lg:col-span-7 min-w-0 min-h-0 relative p-4 sm:p-5 lg:p-6 flex flex-col justify-between items-center text-center gap-2.5 sm:gap-3 bg-gradient-to-br from-[#12261C]/80 via-[#0F1B15]/80 to-[#0B0E0D]/90 border-b lg:border-b-0 lg:border-r border-[#232926]">
@@ -2540,14 +2595,14 @@
 
               <!-- Center Headline & Description (Center Aligned) -->
               <div class="relative z-10 shrink-0 w-full flex flex-col items-center text-center space-y-1.5 sm:space-y-2 overflow-hidden">
-                <span class="animate-badge-zoom-in inline-flex items-center justify-center gap-1.5 px-3 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-400/30 text-emerald-300 text-[11px] font-semibold">
+                <span class="${animBadge} inline-flex items-center justify-center gap-1.5 px-3 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-400/30 text-emerald-300 text-[11px] font-semibold">
                   <i data-lucide="sparkles" class="w-3 h-3 text-[#A3E635]"></i>
                   <span>Bidang Pembinaan Sekolah Dasar</span>
                 </span>
-                <h1 class="animate-text-zoom-in text-lg sm:text-xl xl:text-[1.68rem] font-extrabold text-white leading-[1.18] tracking-tight break-words max-w-2xl mx-auto">
+                <h1 class="${animTitle} text-lg sm:text-xl xl:text-[1.68rem] font-extrabold text-white leading-[1.18] tracking-tight break-words max-w-2xl mx-auto">
                   Sistem Informasi Manajemen <span class="text-transparent bg-clip-text bg-gradient-to-r from-[#A3E635] to-emerald-400">Sarana &amp; Prasarana</span> Sekolah Dasar
                 </h1>
-                <p class="animate-subtext-zoom-in text-xs sm:text-[12.5px] text-gray-300 leading-snug max-w-xl mx-auto">
+                <p class="${animSub} text-xs sm:text-[12.5px] text-gray-300 leading-snug max-w-xl mx-auto">
                   Platform pemetaan kondisi sarana dan prasarana jenjang Sekolah Dasar se-Kabupaten Kutai Timur.
                 </p>
               </div>
@@ -4277,7 +4332,7 @@
       const paginatedSchools = filteredSchools.slice(startIdx, startIdx + perPage);
 
       return `
-        <div class="space-y-6 animate-fade-in">
+        <div class="space-y-6 ${state._shouldAnimate ? 'animate-fade-in' : ''}">
           <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div>
               <h2 class="text-2xl font-bold text-white tracking-tight">
@@ -4643,7 +4698,7 @@
         const school = state.schools.find(s => s.npsn === state.user.npsn) || state.user;
         const hasCoords = isValidCoordinatePair(school.latitude, school.longitude);
         return `
-          <div class="space-y-6 animate-fade-in max-w-4xl">
+          <div class="space-y-6 ${state._shouldAnimate ? 'animate-fade-in' : ''} max-w-4xl">
             <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div>
                 <h2 class="text-2xl font-bold text-white">Profil Sekolah Dasar</h2>
@@ -4808,7 +4863,7 @@
       const paginatedDirSchools = filtered.slice(dirStart, dirStart + dirPerPage);
 
       return `
-        <div class="space-y-6 animate-fade-in">
+        <div class="space-y-6 ${state._shouldAnimate ? 'animate-fade-in' : ''}">
           <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
             <div>
               <h2 class="text-2xl font-bold text-white">Direktori & Manajemen Akun SD (${filtered.length} / ${state.schools.length})</h2>
@@ -4968,7 +5023,7 @@
       });
 
       return `
-        <div class="space-y-6 animate-fade-in">
+        <div class="space-y-6 ${state._shouldAnimate ? 'animate-fade-in' : ''}">
           <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div>
               <h2 class="text-2xl font-bold text-white">Inventaris Sarana Sekolah Dasar</h2>
@@ -5109,7 +5164,7 @@
       });
 
       return `
-        <div class="space-y-6 animate-fade-in">
+        <div class="space-y-6 ${state._shouldAnimate ? 'animate-fade-in' : ''}">
           <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div>
               <h2 class="text-2xl font-bold text-white">Data Prasarana & Bangunan Sekolah</h2>
@@ -5239,7 +5294,7 @@
       const totalAnggaran = filtered.reduce((sum, u) => sum + (Number(u.estimasi_biaya) || 0), 0);
 
       return `
-        <div class="space-y-6 animate-fade-in">
+        <div class="space-y-6 ${state._shouldAnimate ? 'animate-fade-in' : ''}">
           <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div>
               <h2 class="text-2xl font-bold text-white">
@@ -5515,14 +5570,27 @@
     // =========================================================================
     // 11. RENDER ENGINE & BOOTSTRAP
     // =========================================================================
+    let lastRenderedViewKey = null;
+
     function renderApp() {
       const root = document.getElementById('sim-sarpras-root');
       if (!root) return;
+
+      const currentViewKey = !state.user ? 'login' : `${state.user.role}:${state.activeTab}`;
+      const isSameView = currentViewKey === lastRenderedViewKey;
+      const prevScrollTop = isSameView ? root.scrollTop : 0;
+
+      state._shouldAnimate = !isSameView;
+      lastRenderedViewKey = currentViewKey;
 
       if (!state.user) {
         root.innerHTML = renderLoginView();
       } else {
         root.innerHTML = renderDashboardShell();
+      }
+
+      if (isSameView) {
+        root.scrollTop = prevScrollTop;
       }
 
       if (window.lucide) {
@@ -5552,8 +5620,8 @@
       }
     });
 
-    (async function bootstrap() {
-      await initFirebaseIfProduction();
+    (function bootstrap() {
+      firebaseInitPromise = initFirebaseIfProduction();
       renderApp();
     })();
   </script>
